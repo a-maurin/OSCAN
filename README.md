@@ -1,6 +1,6 @@
 # Outil d'analyse OSCAN
 
-Outil Python pour l'analyse des données de contrôles OSCAN (Office Français de la Biodiversité), avec :
+Outil Python pour l'analyse des données de contrôles OSCEAN (Office Français de la Biodiversité), avec :
 
 - une interface graphique (`analyse_oscean_gui.py`) ;
 - un script d'analyse en ligne de commande (`analyse_oscean.py`) ;
