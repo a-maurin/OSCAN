@@ -1,0 +1,42 @@
+############################
+# Données (confidentielles) #
+############################
+#
+# Toutes les données traitées ou sources sont considérées comme
+# confidentielles et ne doivent pas être exportées vers GitHub.
+
+resultats/
+db_test/
+donnees/
+data/
+sources/
+
+##########################
+# Python / temporaires   #
+##########################
+
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.log
+*.tmp
+*.bak
+
+##########################
+# Environnements locaux  #
+##########################
+
+.env
+.venv/
+venv/
+env/
+
+##########################
+# Fichiers système / IDE#
+##########################
+
+.DS_Store
+Thumbs.db
+*.code-workspace
+.vscode/
