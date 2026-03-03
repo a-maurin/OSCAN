@@ -26,7 +26,20 @@ def _charger_dbfread():
 
 
 # Extensions prises en charge
-SUPPORTED_EXT = [".xlsx", ".csv", ".dbf"]
+# - Classeurs / tableaux : .csv, .xls, .xlsx, .xlsm, .ods
+# - Fichiers SIG vectoriels : .shp, .gpkg, .geojson, .json
+SUPPORTED_EXT = [
+    ".csv",
+    ".xls",
+    ".xlsx",
+    ".xlsm",
+    ".ods",
+    ".dbf",
+    ".shp",
+    ".gpkg",
+    ".geojson",
+    ".json",
+]
 
 
 ###############################################################################
@@ -149,6 +162,7 @@ def corriger_encodage_dataframe(df: pd.DataFrame) -> pd.DataFrame:
 def charger_fichier(path: str) -> pd.DataFrame:
     ext = os.path.splitext(path)[1].lower()
 
+    # 1) Fichiers tabulaires texte (CSV)
     if ext == ".csv":
         # Séparateur par défaut ; ajustable selon tes fichiers
         # Essayer plusieurs encodages
@@ -168,11 +182,14 @@ def charger_fichier(path: str) -> pd.DataFrame:
         except Exception:
             raise ValueError(f"Impossible de lire le fichier CSV {path} avec les encodages testés")
 
-    if ext in (".xls", ".xlsx"):
+    # 2) Fichiers tableurs (Excel, ODS, etc.)
+    if ext in (".xls", ".xlsx", ".xlsm", ".ods"):
+        # pandas choisit le moteur adapté selon l'extension
         df = pd.read_excel(path)
         df = corriger_encodage_dataframe(df)
         return df
 
+    # 3) Fichiers DBF (anciens exports SIG / tableurs)
     if ext == ".dbf":
         _charger_dbfread()
         if not HAS_DBFREAD or DBF is None:
@@ -193,6 +210,26 @@ def charger_fichier(path: str) -> pd.DataFrame:
         # Si aucun encodage ne fonctionne, essayer avec cp1252 par défaut
         table = DBF(path, load=True, encoding="cp1252", char_decode_errors="ignore")
         df = pd.DataFrame(iter(table))
+        df = corriger_encodage_dataframe(df)
+        return df
+
+    # 4) Fichiers SIG vectoriels (shapefile, geopackage, geojson, ...)
+    if ext in (".shp", ".gpkg", ".geojson", ".json"):
+        try:
+            import geopandas as gpd  # type: ignore
+        except ImportError as e:  # pragma: no cover - dépendance optionnelle
+            raise RuntimeError(
+                "Lecture d'un fichier SIG demandée mais le module 'geopandas' n'est pas installé.\n"
+                "Installe-le avec par exemple : pip install geopandas"
+            ) from e
+
+        gdf = gpd.read_file(path)
+        # Conserver la géométrie sous forme WKT pour rester utilisable dans les tableaux
+        if "geometry" in gdf.columns:
+            df = gdf.copy()
+            df["geometry"] = df["geometry"].to_wkt()
+        else:
+            df = pd.DataFrame(gdf)
         df = corriger_encodage_dataframe(df)
         return df
 
@@ -752,7 +789,8 @@ def enrichir_avec_sources_fixes(df: pd.DataFrame, sources: dict[str, pd.DataFram
 def exporter_rapport_excel(resultats: dict[str, pd.DataFrame], dossier_sortie: str, base_name: str) -> str:
     os.makedirs(dossier_sortie, exist_ok=True)
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    chemin = os.path.join(dossier_sortie, f"rapport_{base_name}_{timestamp}.xlsx")
+    # Nom du fichier Excel : base_name puis horodatage (ex : oscan_YYYYMMDD_HHMMSS.xlsx)
+    chemin = os.path.join(dossier_sortie, f"{base_name}{timestamp}.xlsx")
 
     # Noms de feuilles déjà utilisés (Excel limite 31 car. et interdit les doublons)
     noms_feuilles_utilises: set[str] = set()
@@ -934,14 +972,15 @@ def main() -> None:
     print("Tableaux générés :", list(resultats.keys()))
 
     dossier_resultats = os.path.join(os.path.dirname(__file__), "resultats")
-    # nom de base à partir du premier fichier choisi
-    base_name = os.path.splitext(os.path.basename(fichiers_choisis[0][1]))[0]
+    # Nom de base du rapport : préfixe fixe "oscan_" puis horodatage
+    base_name = "oscan_"
 
     chemin_excel = exporter_rapport_excel(resultats, dossier_resultats, base_name)
     print(f"\nClasseur Excel créé : {chemin_excel}")
 
     from rapport_pdf_oscean import generer_pdf_oscan
     try:
+        # En mode script, on utilise le style par défaut (histogrammes)
         chemin_pdf = generer_pdf_oscan(dossier_resultats, resultats, base_name)
         print(f"Rapport PDF créé   : {chemin_pdf}")
     except Exception as e:

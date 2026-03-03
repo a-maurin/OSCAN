@@ -17,9 +17,13 @@ from reportlab.platypus import (
     TableStyle,
     PageBreak,
     KeepTogether,
+    Image,
 )
 from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.ttfonts import TTFont
+
+import matplotlib.pyplot as plt
+import pandas as pd
 
 
 ###############################################################################
@@ -195,10 +199,130 @@ def _table_from_dataframe(
     return t
 
 
+def _generer_graphiques(
+    resultats: Dict[str, pd.DataFrame],
+    dossier_sortie: Path,
+    base_name: str,
+    horodatage: str,
+    graph_config: Dict[str, str] | None = None,
+) -> Dict[str, Path]:
+    """
+    Génère des graphiques simples (barres horizontales) pour les tableaux pertinents.
+    Retourne un dict {nom_tableau: chemin_fichier_png}.
+    """
+    figures: Dict[str, Path] = {}
+    fig_dir = dossier_sortie / "figures"
+    fig_dir.mkdir(parents=True, exist_ok=True)
+
+    def _slugify(nom: str) -> str:
+        s = str(nom).lower()
+        s = "".join(c if c.isalnum() or c in "-_" else "_" for c in s)
+        while "__" in s:
+            s = s.replace("__", "_")
+        return s.strip("_") or "graphique"
+
+    for cle, df in resultats.items():
+        if not isinstance(df, pd.DataFrame) or df.empty:
+            continue
+
+        # Si une configuration explicite est fournie, ne garder que les tableaux sélectionnés
+        if graph_config is not None and cle not in graph_config:
+            continue
+
+        # Chercher une colonne numérique
+        numeric_col = None
+        for col in df.columns:
+            if pd.api.types.is_numeric_dtype(df[col]):
+                numeric_col = col
+                break
+        if numeric_col is None:
+            continue
+
+        # Colonne de catégories : première non numérique
+        category_col = None
+        for col in df.columns:
+            if not pd.api.types.is_numeric_dtype(df[col]):
+                category_col = col
+                break
+        if category_col is None:
+            continue
+
+        # Limiter le nombre de catégories pour lisibilité
+        df_plot = df[[category_col, numeric_col]].copy()
+        df_plot = df_plot.dropna(subset=[numeric_col])
+        if df_plot.empty:
+            continue
+        df_plot = df_plot.sort_values(by=numeric_col, ascending=True).tail(20)
+
+        try:
+            # Style demandé (par défaut : histogramme/barres)
+            style = "bar"
+            if graph_config is not None:
+                style = graph_config.get(cle, "bar") or "bar"
+
+            fig, ax = plt.subplots(figsize=(8, 4))
+
+            if style == "pie":
+                # Camembert : on utilise les valeurs numériques comme tailles
+                labels = df_plot[category_col].astype(str)
+                sizes = df_plot[numeric_col]
+                # Limiter le nombre de parts explose parfois la lisibilité, mais déjà limité à 20
+                ax.pie(
+                    sizes,
+                    labels=labels,
+                    autopct="%1.1f%%",
+                    startangle=90,
+                    textprops={"fontsize": 8},
+                )
+                ax.set_title(str(cle), color=OFB_BLEU_PRINCIPAL)
+                ax.axis("equal")
+            elif style == "line":
+                # Courbe simple : catégories sur l'axe X, valeurs sur Y
+                x = range(len(df_plot))
+                ax.plot(
+                    x,
+                    df_plot[numeric_col],
+                    marker="o",
+                    color=colors.HexColor(OFB_BLEU_PRINCIPAL),
+                )
+                ax.set_xticks(x)
+                ax.set_xticklabels(df_plot[category_col].astype(str), rotation=45, ha="right")
+                ax.set_ylabel(str(numeric_col))
+                ax.set_title(str(cle), color=OFB_BLEU_PRINCIPAL)
+                ax.grid(axis="y", linestyle=":", color="#cccccc", alpha=0.7)
+            else:
+                # Histogramme / barres horizontales (par défaut)
+                ax.barh(
+                    df_plot[category_col].astype(str),
+                    df_plot[numeric_col],
+                    color=colors.HexColor(OFB_BLEU_PRINCIPAL),
+                )
+                ax.set_xlabel(str(numeric_col))
+                ax.set_ylabel(str(category_col))
+                ax.set_title(str(cle), color=OFB_BLEU_PRINCIPAL)
+                ax.grid(axis="x", linestyle=":", color="#cccccc", alpha=0.7)
+
+            plt.tight_layout()
+
+            slug = _slugify(cle)
+            fig_path = fig_dir / f"{base_name}{slug}_{horodatage}.png"
+            fig.savefig(fig_path, dpi=150)
+            plt.close(fig)
+
+            figures[cle] = fig_path
+        except Exception:
+            # Ne pas faire échouer le PDF si un graphique pose problème
+            plt.close("all")
+            continue
+
+    return figures
+
+
 def generer_pdf_oscan(
     dossier_sortie: str | Path,
     resultats: Dict[str, pd.DataFrame],
     base_name: str,
+    graph_config: Dict[str, str] | None = None,
 ) -> str:
     """
     Génère un rapport PDF de synthèse OSCAN, en complément du classeur Excel.
@@ -211,7 +335,11 @@ def generer_pdf_oscan(
     dossier.mkdir(parents=True, exist_ok=True)
 
     horodatage = datetime.now().strftime("%Y%m%d_%H%M%S")
-    nom_pdf = dossier / f"rapport_{base_name}_{horodatage}.pdf"
+    # Nom du PDF : base_name puis horodatage (ex : oscan_YYYYMMDD_HHMMSS.pdf)
+    nom_pdf = dossier / f"{base_name}{horodatage}.pdf"
+
+    # Générer les graphiques à partir des tableaux (respect de la charte OFB)
+    figures = _generer_graphiques(resultats, dossier, base_name, horodatage, graph_config)
 
     police = _enregistrer_police_arial()
     font_table_header = "Arial-Bold" if police == "Arial" else "Helvetica-Bold"
@@ -232,7 +360,9 @@ def generer_pdf_oscan(
     # ------------------------------------------------------------------
     # Page de garde
     # ------------------------------------------------------------------
-    story.append(Spacer(1, 40 * mm))
+    # Bandeau de couverture inspiré des gabarits OFB :
+    # grand titre centré, sous-titre et date, avec marges généreuses.
+    story.append(Spacer(1, 45 * mm))
     story.append(
         Paragraph(
             "Bilan OSCAN – Synthèse",
@@ -316,21 +446,27 @@ def generer_pdf_oscan(
                 df_nat, font_table_header, font_table_body, wrap_first_column=True
             )
             if tab_nat is not None:
-                story.append(
-                    KeepTogether(
+                elements = [
+                    Paragraph(f"{section_num}. Répartition des contrôles par NATINF", styles["OFBTitle"]),
+                    Spacer(1, 4 * mm),
+                    Paragraph(
+                        "Nombre de contrôles regroupés par libellé NATINF (référentiel fixe).",
+                        styles["OFBBody"],
+                    ),
+                    Spacer(1, 4 * mm),
+                    tab_nat,
+                ]
+                # Ajouter le graphique associé si disponible
+                fig_path = figures.get(cle_natinf)
+                if fig_path and fig_path.exists():
+                    elements.extend(
                         [
-                            Paragraph(f"{section_num}. Répartition des contrôles par NATINF", styles["OFBTitle"]),
-                            Spacer(1, 4 * mm),
-                            Paragraph(
-                                "Nombre de contrôles regroupés par libellé NATINF (référentiel fixe).",
-                                styles["OFBBody"],
-                            ),
-                            Spacer(1, 4 * mm),
-                            tab_nat,
-                            Spacer(1, 10 * mm),
+                            Spacer(1, 6 * mm),
+                            Image(str(fig_path), width=LARGEUR_UTILE, preserveAspectRatio=True, hAlign="CENTER"),
                         ]
                     )
-                )
+                elements.append(Spacer(1, 10 * mm))
+                story.append(KeepTogether(elements))
                 section_num += 1
 
     if cle_tub_counts in resultats and isinstance(resultats[cle_tub_counts], pd.DataFrame):
@@ -340,21 +476,26 @@ def generer_pdf_oscan(
                 df_tub, font_table_header, font_table_body, wrap_first_column=False
             )
             if tab_tub is not None:
-                story.append(
-                    KeepTogether(
+                elements = [
+                    Paragraph(f"{section_num}. Contrôles par zone TUB", styles["OFBTitle"]),
+                    Spacer(1, 4 * mm),
+                    Paragraph(
+                        "Répartition des contrôles selon l'appartenance ou non à la zone TUB de la Côte-d'Or.",
+                        styles["OFBBody"],
+                    ),
+                    Spacer(1, 4 * mm),
+                    tab_tub,
+                ]
+                fig_path = figures.get(cle_tub_counts)
+                if fig_path and fig_path.exists():
+                    elements.extend(
                         [
-                            Paragraph(f"{section_num}. Contrôles par zone TUB", styles["OFBTitle"]),
-                            Spacer(1, 4 * mm),
-                            Paragraph(
-                                "Répartition des contrôles selon l'appartenance ou non à la zone TUB de la Côte-d'Or.",
-                                styles["OFBBody"],
-                            ),
-                            Spacer(1, 4 * mm),
-                            tab_tub,
-                            Spacer(1, 10 * mm),
+                            Spacer(1, 6 * mm),
+                            Image(str(fig_path), width=LARGEUR_UTILE, preserveAspectRatio=True, hAlign="CENTER"),
                         ]
                     )
-                )
+                elements.append(Spacer(1, 10 * mm))
+                story.append(KeepTogether(elements))
                 section_num += 1
 
     if cle_tub_conf in resultats and isinstance(resultats[cle_tub_conf], pd.DataFrame):
@@ -364,21 +505,26 @@ def generer_pdf_oscan(
                 df_tub_conf, font_table_header, font_table_body, wrap_first_column=False
             )
             if tab_tub_conf is not None:
-                story.append(
-                    KeepTogether(
+                elements = [
+                    Paragraph(f"{section_num}. Conformité par zone TUB", styles["OFBTitle"]),
+                    Spacer(1, 4 * mm),
+                    Paragraph(
+                        "Tableau de conformité croisant la zone TUB et le résultat des contrôles.",
+                        styles["OFBBody"],
+                    ),
+                    Spacer(1, 4 * mm),
+                    tab_tub_conf,
+                ]
+                fig_path = figures.get(cle_tub_conf)
+                if fig_path and fig_path.exists():
+                    elements.extend(
                         [
-                            Paragraph(f"{section_num}. Conformité par zone TUB", styles["OFBTitle"]),
-                            Spacer(1, 4 * mm),
-                            Paragraph(
-                                "Tableau de conformité croisant la zone TUB et le résultat des contrôles.",
-                                styles["OFBBody"],
-                            ),
-                            Spacer(1, 4 * mm),
-                            tab_tub_conf,
-                            Spacer(1, 10 * mm),
+                            Spacer(1, 6 * mm),
+                            Image(str(fig_path), width=LARGEUR_UTILE, preserveAspectRatio=True, hAlign="CENTER"),
                         ]
                     )
-                )
+                elements.append(Spacer(1, 10 * mm))
+                story.append(KeepTogether(elements))
                 section_num += 1
 
     # ------------------------------------------------------------------
@@ -397,16 +543,21 @@ def generer_pdf_oscan(
             if tab is None:
                 continue
 
-            story.append(
-                KeepTogether(
+            elements = [
+                Paragraph(titre, styles["OFBTitle"]),
+                Spacer(1, 4 * mm),
+                tab,
+            ]
+            fig_path = figures.get(cle)
+            if fig_path and fig_path.exists():
+                elements.extend(
                     [
-                        Paragraph(titre, styles["OFBTitle"]),
-                        Spacer(1, 4 * mm),
-                        tab,
-                        Spacer(1, 10 * mm),
+                        Spacer(1, 6 * mm),
+                        Image(str(fig_path), width=LARGEUR_UTILE, preserveAspectRatio=True, hAlign="CENTER"),
                     ]
                 )
-            )
+            elements.append(Spacer(1, 10 * mm))
+            story.append(KeepTogether(elements))
             section_num += 1
 
     # Si aucun contenu, ajouter un message simple

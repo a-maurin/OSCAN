@@ -186,57 +186,8 @@ class AnalyseThread(QThread):
 
             # Journal : liste des tableaux générés (utile avec 2+ sources)
             self.progress.emit("Tableaux générés : " + ", ".join(resultats.keys()))
-            self.progress.emit("Export des rapports...")
-            dossier_resultats = os.path.join(os.path.dirname(__file__), "resultats")
-            base_name = self.options.get("nom_rapport", "rapport_oscan")
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-
-            chemins_rapports = []
-            if self.options.get("generer_excel", True):
-                chemin_excel = os.path.join(
-                    dossier_resultats, f"{base_name}_{timestamp}.xlsx"
-                )
-                os.makedirs(dossier_resultats, exist_ok=True)
-                noms_feuilles_utilises = set()
-                with pd.ExcelWriter(chemin_excel, engine="openpyxl") as writer:
-                    for nom, df in resultats.items():
-                        df_export = remplacer_valeurs_vides_tableau(df.copy())
-                        safe_name = re.sub(r'[:\\\\/\\?\\*\\[\\]<>"]', "_", str(nom))
-                        safe_name = safe_name.strip()
-                        if not safe_name:
-                            safe_name = "Feuille"
-                        base_name = safe_name[:31]
-                        sheet_name = base_name
-                        compteur = 1
-                        while sheet_name in noms_feuilles_utilises:
-                            suffix = f"_{compteur}"
-                            sheet_name = (base_name[: 31 - len(suffix)] + suffix)
-                            compteur += 1
-                        noms_feuilles_utilises.add(sheet_name)
-                        df_export.to_excel(writer, sheet_name=sheet_name, index=False)
-                chemins_rapports.append(chemin_excel)
-
-            if self.options.get("generer_pdf", False):
-                try:
-                    from rapport_pdf_oscean import generer_pdf_oscan
-                    chemin_pdf = generer_pdf_oscan(dossier_resultats, resultats, base_name)
-                    chemins_rapports.append(chemin_pdf)
-                except Exception as e:
-                    self.progress.emit(f"Attention : échec de la génération du PDF ({type(e).__name__}: {e})")
-
-            if self.options.get("generer_csv", False):
-                # Exporter chaque tableau dans un CSV séparé
-                for nom, df in resultats.items():
-                    safe_name = re.sub(r'[:\\\\/\\?\\*\\[\\]<>"]', "_", str(nom))[:50]
-                    chemin_csv = os.path.join(
-                        dossier_resultats, f"{base_name}_{safe_name}_{timestamp}.csv"
-                    )
-                    os.makedirs(dossier_resultats, exist_ok=True)
-                    df_export = remplacer_valeurs_vides_tableau(df.copy())
-                    df_export.to_csv(chemin_csv, index=False, encoding="utf-8-sig")
-                    chemins_rapports.append(chemin_csv)
-
-            self.finished.emit(resultats, "\n".join(chemins_rapports))
+            # Ne pas exporter les rapports dans le thread : laisser le choix des graphiques à l'utilisateur
+            self.finished.emit(resultats, "")
 
         except Exception as e:
             self.error.emit(f"Erreur lors de l'analyse: {str(e)}")
@@ -298,6 +249,85 @@ class FenetreResumeDialog(QDialog):
         layout.addWidget(tabs)
 
 
+class GraphConfigDialog(QDialog):
+    """Fenêtre de configuration des graphiques (choix des tableaux et du style)."""
+
+    def __init__(self, noms_tableaux: list[str], parent: Optional[QWidget] = None):
+        super().__init__(parent)
+        self.setWindowTitle("Configuration des graphiques")
+        self.setMinimumSize(600, 400)
+        self.noms_tableaux = noms_tableaux
+        self._build_ui()
+
+    def _build_ui(self) -> None:
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(12, 12, 12, 12)
+        layout.setSpacing(10)
+
+        label_info = QLabel(
+            "Sélectionnez les tableaux pour lesquels un graphique sera généré,\n"
+            "et choisissez le style de graphique souhaité."
+        )
+        label_info.setWordWrap(True)
+        layout.addWidget(label_info)
+
+        self.table = QTableWidget(len(self.noms_tableaux), 3)
+        self.table.setHorizontalHeaderLabels(["Inclure", "Tableau", "Style de graphique"])
+        self.table.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
+        self.table.setAlternatingRowColors(True)
+
+        styles = [
+            ("bar", "Histogramme (barres)"),
+            ("pie", "Camembert"),
+            ("line", "Courbe"),
+        ]
+
+        for row, nom in enumerate(self.noms_tableaux):
+            # Proposition par défaut : inclure les tableaux de type "Nombre de contrôles" ou "Conformité"
+            lower = str(nom).lower()
+            inclure_par_defaut = lower.startswith("nombre de contrôles") or lower.startswith("conformité")
+
+            chk = QCheckBox()
+            chk.setChecked(inclure_par_defaut)
+            self.table.setCellWidget(row, 0, chk)
+
+            item_nom = QTableWidgetItem(str(nom))
+            item_nom.setFlags(item_nom.flags() & ~Qt.ItemIsEditable)
+            self.table.setItem(row, 1, item_nom)
+
+            combo = QComboBox()
+            for code, label in styles:
+                combo.addItem(label, userData=code)
+            # Style par défaut : histogramme
+            combo.setCurrentIndex(0)
+            self.table.setCellWidget(row, 2, combo)
+
+        self.table.verticalHeader().setVisible(False)
+        layout.addWidget(self.table)
+
+        # Boutons OK / Annuler
+        btn_layout = QHBoxLayout()
+        btn_layout.addStretch()
+        btn_ok = QPushButton("Valider")
+        btn_cancel = QPushButton("Annuler")
+        btn_ok.clicked.connect(self.accept)
+        btn_cancel.clicked.connect(self.reject)
+        btn_layout.addWidget(btn_cancel)
+        btn_layout.addWidget(btn_ok)
+        layout.addLayout(btn_layout)
+
+    def get_config(self) -> dict[str, str]:
+        """Retourne un dict {nom_tableau: style_code} pour les tableaux cochés."""
+        config: dict[str, str] = {}
+        for row, nom in enumerate(self.noms_tableaux):
+            chk = self.table.cellWidget(row, 0)
+            combo = self.table.cellWidget(row, 2)
+            if isinstance(chk, QCheckBox) and chk.isChecked() and isinstance(combo, QComboBox):
+                style_code = combo.currentData() or "bar"
+                config[nom] = style_code
+        return config
+
+
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -305,6 +335,8 @@ class MainWindow(QMainWindow):
             self.settings = QSettings("OSCAN", "AnalyseTool")
             self.fichiers_candidats = []
             self.thread_analyse: Optional[AnalyseThread] = None
+            self.derniere_options: dict | None = None
+            self.dernier_resultats: dict | None = None
             self.init_ui()
         except Exception as e:
             print(f"ERREUR lors de l'initialisation de MainWindow:")
@@ -561,7 +593,8 @@ class MainWindow(QMainWindow):
         nom_label = QLabel("Nom de base du rapport:")
         nom_label.setStyleSheet("color: #333;")
         layout.addWidget(nom_label)
-        self.nom_rapport_input = QLineEdit("rapport_oscan")
+        # Préfixe par défaut : "oscan_" (donne oscan_YYYYMMDD_HHMMSS.ext)
+        self.nom_rapport_input = QLineEdit("oscan_")
         self.nom_rapport_input.setMinimumWidth(180)
         layout.addWidget(self.nom_rapport_input)
         
@@ -883,7 +916,7 @@ class MainWindow(QMainWindow):
             "generer_excel": self.check_excel.isChecked(),
             "generer_pdf": getattr(self, "check_pdf", None).isChecked() if hasattr(self, "check_pdf") else True,
             "generer_csv": self.check_csv.isChecked(),
-            "nom_rapport": self.nom_rapport_input.text() or "rapport_oscan",
+            "nom_rapport": self.nom_rapport_input.text() or "oscan_",
         }
 
         # Filtres métier
@@ -899,6 +932,9 @@ class MainWindow(QMainWindow):
         if champs_filtres:
             options["filtre_champs"] = champs_filtres
 
+        # Mémoriser les options pour l'étape d'export
+        self.derniere_options = options
+
         # Lancer l'analyse dans un thread
         self.progress_bar.setVisible(True)
         self.progress_bar.setRange(0, 0)  # Indéterminé
@@ -913,12 +949,37 @@ class MainWindow(QMainWindow):
         self.thread_analyse.start()
 
     def analyse_terminee(self, resultats, chemins):
+        # L'analyse (chargement + tableaux) est terminée, on propose maintenant
+        # à l'utilisateur de choisir quels tableaux auront des graphiques.
         self.progress_bar.setVisible(False)
-        self.label_statut.setText("Analyse terminée avec succès")
+        self.label_statut.setText("Analyse terminée (tableaux prêts)")
         if self.btn_lancer:
             self.btn_lancer.setEnabled(True)
-        self.ajouter_journal(f"Rapports générés:\n{chemins}")
-        QMessageBox.information(self, "Succès", f"Analyse terminée.\n\nRapports:\n{chemins}")
+
+        if not isinstance(resultats, dict) or not resultats:
+            QMessageBox.warning(self, "Information", "Aucun tableau généré, rien à exporter.")
+            return
+
+        self.dernier_resultats = resultats
+
+        # Construire la liste des tableaux proposés pour les graphiques
+        noms_tableaux = [
+            nom
+            for nom, df in resultats.items()
+            if isinstance(df, pd.DataFrame) and not df.empty and nom != "Resume_sources"
+        ]
+        if not noms_tableaux:
+            # Pas de tableaux pertinents, on exporte directement sans graphiques
+            self.exporter_rapports(resultats, {})
+            return
+
+        dialog = GraphConfigDialog(noms_tableaux, self)
+        if dialog.exec() != QDialog.Accepted:
+            self.ajouter_journal("Export annulé par l'utilisateur (configuration des graphiques).")
+            return
+
+        graph_config = dialog.get_config()
+        self.exporter_rapports(resultats, graph_config)
 
     def analyse_erreur(self, message):
         self.progress_bar.setVisible(False)
@@ -931,6 +992,69 @@ class MainWindow(QMainWindow):
     def ajouter_journal(self, message):
         timestamp = datetime.now().strftime("%H:%M:%S")
         self.fenetre_resume.journal.append(f"[{timestamp}] {message}")
+
+    def exporter_rapports(self, resultats: dict, graph_config: dict[str, str]) -> None:
+        """Exporte les rapports (Excel, PDF, CSV) en utilisant les dernières options et la configuration de graphiques."""
+        options = self.derniere_options or {}
+
+        dossier_resultats = os.path.join(os.path.dirname(__file__), "resultats")
+        base_name = options.get("nom_rapport", "oscan_") or "oscan_"
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+
+        self.ajouter_journal("Export des rapports...")
+
+        chemins_rapports: list[str] = []
+
+        # Excel
+        if options.get("generer_excel", True):
+            chemin_excel = os.path.join(dossier_resultats, f"{base_name}{timestamp}.xlsx")
+            os.makedirs(dossier_resultats, exist_ok=True)
+            noms_feuilles_utilises: set[str] = set()
+            with pd.ExcelWriter(chemin_excel, engine="openpyxl") as writer:
+                for nom, df in resultats.items():
+                    df_export = remplacer_valeurs_vides_tableau(df.copy())
+                    safe_name = re.sub(r'[:\\\\/\\?\\*\\[\\]<>"]', "_", str(nom))
+                    safe_name = safe_name.strip()
+                    if not safe_name:
+                        safe_name = "Feuille"
+                    short_name = safe_name[:31]
+                    sheet_name = short_name
+                    compteur = 1
+                    while sheet_name in noms_feuilles_utilises:
+                        suffix = f"_{compteur}"
+                        sheet_name = (short_name[: 31 - len(suffix)] + suffix)
+                        compteur += 1
+                    noms_feuilles_utilises.add(sheet_name)
+                    df_export.to_excel(writer, sheet_name=sheet_name, index=False)
+            chemins_rapports.append(chemin_excel)
+
+        # PDF
+        if options.get("generer_pdf", False):
+            try:
+                from rapport_pdf_oscean import generer_pdf_oscan
+
+                chemin_pdf = generer_pdf_oscan(dossier_resultats, resultats, base_name, graph_config)
+                chemins_rapports.append(chemin_pdf)
+            except Exception as e:
+                self.ajouter_journal(
+                    f"Attention : échec de la génération du PDF ({type(e).__name__}: {e})"
+                )
+
+        # CSV
+        if options.get("generer_csv", False):
+            for nom, df in resultats.items():
+                safe_name = re.sub(r'[:\\\\/\\?\\*\\[\\]<>"]', "_", str(nom))[:50]
+                chemin_csv = os.path.join(
+                    dossier_resultats, f"{base_name}{safe_name}_{timestamp}.csv"
+                )
+                os.makedirs(dossier_resultats, exist_ok=True)
+                df_export = remplacer_valeurs_vides_tableau(df.copy())
+                df_export.to_csv(chemin_csv, index=False, encoding="utf-8-sig")
+                chemins_rapports.append(chemin_csv)
+
+        chemins_str = "\n".join(chemins_rapports)
+        self.ajouter_journal(f"Rapports générés:\n{chemins_str}")
+        QMessageBox.information(self, "Succès", f"Analyse terminée.\n\nRapports:\n{chemins_str}")
 
     def _fichiers_selectionnes(self):
         """Retourne la liste (ext, path) des fichiers cochés dans le tableau."""
